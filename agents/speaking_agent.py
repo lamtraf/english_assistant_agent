@@ -3,7 +3,9 @@ import logging
 import os
 import tempfile
 import traceback
+import json
 from typing import Tuple, Optional, List, Dict, Any
+from datetime import datetime
 
 from .studyplan import BaseAgent # Giả sử BaseAgent nằm trong studyplan.py cùng thư mục agents
 
@@ -27,27 +29,81 @@ logger = logging.getLogger(__name__)
 class SpeakingPracticeAgent(BaseAgent):
     def __init__(
         self,
-        whisper_model_name: str = "tiny.en", # Các model Whisper: tiny, base, small, medium, large
-        gemini_model: str = "gemini-1.5-flash-latest",
-        gemini_temperature: float = 0.7,
-        gemini_streaming: bool = True,
-        initial_greeting: Optional[str] = "Hello! What would you like to talk about today?",
-        language_code: str = "en" # Mã ngôn ngữ cho Whisper và pyttsx3
+        streaming: bool = False,
+        # Thêm các tham số cho luyện nói
+        current_level: Optional[str] = None,
+        preferred_topics: Optional[List[str]] = None,
+        practice_duration: Optional[int] = None,
+        focus_areas: Optional[List[str]] = None
     ):
-        super().__init__(temperature=gemini_temperature, model=gemini_model, streaming=gemini_streaming)
-        self.whisper_model_name = whisper_model_name
-        self.whisper_model = None
-        self.tts_engine = None
-        self.language_code = language_code
-        self.initial_greeting = initial_greeting
-
-        # Lịch sử hội thoại được cấu trúc lại
+        super().__init__(streaming=streaming)
+        self.current_level = current_level if current_level else "intermediate"
+        self.preferred_topics = preferred_topics if preferred_topics else ["daily conversation", "business", "travel"]
+        self.practice_duration = practice_duration if practice_duration else 15  # phút
+        self.focus_areas = focus_areas if focus_areas else ["pronunciation", "fluency", "vocabulary"]
         self.conversation_history: List[Dict[str, str]] = []
-        if self.initial_greeting:
-            self.conversation_history.append({"role": "model", "content": self.initial_greeting})
 
-        self._load_whisper_model()
-        self._initialize_tts()
+    async def run(self, user_input: str) -> Dict[str, Any]:
+        """Tạo bài luyện nói dựa trên yêu cầu của người dùng"""
+        try:
+            if not user_input or not user_input.strip():
+                return {
+                    "error": "Yêu cầu không được để trống",
+                    "details": "Vui lòng nhập yêu cầu của bạn"
+                }
+
+            # Tạo prompt chi tiết
+            prompt = f"""Hãy tạo một bài luyện nói tiếng Anh chi tiết dưới dạng JSON object.
+Yêu cầu của người dùng:
+{user_input}
+
+Yêu cầu output:
+1. Phải là JSON object hợp lệ
+2. Bao gồm các trường:
+   - topic: Chủ đề luyện nói
+   - level: Trình độ phù hợp
+   - duration: Thời gian luyện tập (phút)
+   - conversation_starter: Câu hỏi/câu chuyện để bắt đầu
+   - key_vocabulary: Danh sách từ vựng quan trọng
+   - grammar_points: Các điểm ngữ pháp cần lưu ý
+   - practice_questions: Danh sách câu hỏi luyện tập
+   - tips: Lời khuyên khi luyện nói
+3. Đảm bảo nội dung phù hợp với trình độ và sở thích của người dùng
+4. Tập trung vào các chủ đề thực tế và hữu ích"""
+
+            logger.info(f"[SpeakingPracticeAgent] Generating speaking practice with detailed prompt for JSON output.")
+            logger.info(f"[SpeakingPracticeAgent] Prompt: {prompt}")
+
+            # Gọi Gemini API thông qua BaseAgent
+            full_response = ""
+            async for chunk in self.ask(prompt):
+                if chunk:
+                    full_response += chunk
+
+            if not full_response:
+                return {
+                    "error": "Không nhận được phản hồi từ AI",
+                    "details": "Vui lòng thử lại sau"
+                }
+
+            # Parse JSON response
+            try:
+                practice_plan = json.loads(full_response)
+                logger.info(f"[SpeakingPracticeAgent] Đã tạo bài luyện nói thành công")
+                return practice_plan
+            except json.JSONDecodeError as e:
+                logger.error(f"[SpeakingPracticeAgent] Failed to decode JSON from LLM: {e}. Response: {full_response}")
+                return {
+                    "error": "Không thể phân tích bài luyện nói từ AI",
+                    "details": str(e)
+                }
+
+        except Exception as e:
+            logger.error(f"[SpeakingPracticeAgent] Error generating speaking practice: {e}")
+            return {
+                "error": "Lỗi khi tạo bài luyện nói",
+                "details": str(e)
+            }
 
     def _load_whisper_model(self):
         try:

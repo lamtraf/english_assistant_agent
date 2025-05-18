@@ -4,174 +4,105 @@ from typing import List, Dict, Any, Optional
 
 from agents.studyplan import BaseAgent # Sử dụng BaseAgent từ studyplan.py
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
 class GrammarAgent(BaseAgent):
     def __init__(
         self,
-        model: str = "gemini-1.0-pro", # Cân nhắc dùng model mạnh hơn nếu cần giải thích sâu
-        streaming: bool = False, # Thường không cần streaming cho giải thích / sửa lỗi
-        **kwargs
+        streaming: bool = False
     ):
-        super().__init__(model=model, streaming=streaming, **kwargs)
+        super().__init__(streaming=streaming)
 
-    async def explain_grammar_rule(self, rule_name: str, level: str = "intermediate") -> str:
-        """
-        Giải thích một quy tắc ngữ pháp.
-        """
-        prompt = f"""Hãy giải thích quy tắc ngữ pháp sau: '{rule_name}'.
-Giải thích một cách rõ ràng, dễ hiểu, phù hợp với người học tiếng Anh ở trình độ {level}.
-Bao gồm các điểm chính, cách sử dụng và ít nhất 2 ví dụ minh họa cho mỗi điểm chính.
-Nếu quy tắc có các trường hợp ngoại lệ phổ biến, hãy đề cập đến chúng.
-Trình bày câu trả lời một cách có cấu trúc, sử dụng markdown nếu cần thiết (ví dụ: tiêu đề, danh sách)."""
+    def _clean_content(self, content: str) -> str:
+        """Xử lý nội dung từ Gemini API để loại bỏ markdown và định dạng không mong muốn"""
+        # Loại bỏ các ký tự markdown
+        content = re.sub(r'\*\*(.*?)\*\*', r'\1', content)  # Loại bỏ **
+        content = re.sub(r'\*(.*?)\*', r'\1', content)      # Loại bỏ *
+        content = re.sub(r'_(.*?)_', r'\1', content)        # Loại bỏ _
+        content = re.sub(r'`(.*?)`', r'\1', content)        # Loại bỏ `
         
-        logger.info(f"[{self.__class__.__name__}] Explaining grammar rule: {rule_name} for level {level}")
+        # Thay thế các ký tự xuống dòng
+        content = content.replace('\\n', '\n')
         
-        response_parts = []
-        async for chunk in self.ask(prompt):
-            response_parts.append(chunk)
-        explanation = "".join(response_parts)
+        # Loại bỏ khoảng trắng thừa
+        content = re.sub(r'\n\s*\n', '\n\n', content)
+        content = content.strip()
         
-        logger.info(f"[{self.__class__.__name__}] Explanation for '{rule_name}': {explanation[:200]}...")
-        return explanation
+        return content
 
-    async def correct_text(self, text: str, explain_errors: bool = True) -> Dict[str, Any]:
-        """
-        Sửa lỗi ngữ pháp trong văn bản và giải thích các lỗi (nếu được yêu cầu).
-        Trả về một dictionary chứa văn bản gốc, văn bản đã sửa, và danh sách các giải thích.
-        """
-        if explain_errors:
-            prompt = f"""Vui lòng sửa lỗi ngữ pháp, chính tả và cách dùng từ trong đoạn văn bản sau.
-Đồng thời, hãy cung cấp một danh sách các lỗi đã được sửa, giải thích ngắn gọn cho từng lỗi và gợi ý cách sửa.
-Định dạng output mong muốn là một JSON object với các key sau:
-- "original_text": (string) văn bản gốc.
-- "corrected_text": (string) văn bản đã được sửa hoàn chỉnh.
-- "corrections": (array of objects) mỗi object chứa:
-    - "error_type": (string) loại lỗi (ví dụ: "verb tense", "preposition", "spelling", "word choice").
-    - "original_phrase": (string) cụm từ/từ bị lỗi trong văn bản gốc.
-    - "corrected_phrase": (string) cụm từ/từ đã được sửa.
-    - "explanation": (string) giải thích ngắn gọn về lỗi và tại sao lại sửa như vậy.
-
-Văn bản cần sửa:
----
-{text}
----
-Chỉ trả về JSON object, không có bất kỳ văn bản nào khác trước hoặc sau JSON.
-"""
-        else:
-            prompt = f"""Vui lòng sửa lỗi ngữ pháp, chính tả và cách dùng từ trong đoạn văn bản sau.
-Chỉ trả về văn bản đã được sửa hoàn chỉnh, không có giải thích hay bất kỳ định dạng nào khác.
-
-Văn bản cần sửa:
----
-{text}
----
-"""
-        logger.info(f"[{self.__class__.__name__}] Correcting text (explain_errors={explain_errors}): {text[:100]}...")
-        
-        response_parts = []
-        async for chunk in self.ask(prompt):
-            response_parts.append(chunk)
-        raw_response = "".join(response_parts)
-
-        if explain_errors:
-            try:
-                # Cố gắng loại bỏ ```json và ``` nếu Gemini trả về
-                if raw_response.strip().startswith("```json"):
-                    raw_response = raw_response.strip()[7:]
-                if raw_response.strip().endswith("```"):
-                    raw_response = raw_response.strip()[:-3]
-                
-                result = json.loads(raw_response)
-                # Đảm bảo các trường bắt buộc có mặt
-                if not all(k in result for k in ["original_text", "corrected_text", "corrections"]):
-                    logger.error(f"JSON response from LLM is missing required keys. Response: {raw_response}")
-                    # Fallback nếu JSON không đúng cấu trúc mong đợi
-                    return {
-                        "original_text": text,
-                        "corrected_text": "Error: Could not parse corrections from LLM. Raw response: " + raw_response,
-                        "corrections": []
-                    }
-                logger.info(f"[{self.__class__.__name__}] Text corrected successfully with explanations.")
-                return result
-            except json.JSONDecodeError:
-                logger.error(f"[{self.__class__.__name__}] Failed to decode JSON response for corrections: {raw_response}")
-                # Fallback nếu không parse được JSON
+    async def run(self, user_input: str) -> Dict[str, Any]:
+        """Kiểm tra và giải thích ngữ pháp"""
+        try:
+            if not user_input or not user_input.strip():
                 return {
-                    "original_text": text,
-                    "corrected_text": "Error: LLM did not return valid JSON. Raw response: " + raw_response,
-                    "corrections": []
+                    "error": "Yêu cầu không được để trống",
+                    "details": "Vui lòng nhập yêu cầu của bạn"
                 }
-        else:
-            logger.info(f"[{self.__class__.__name__}] Text corrected (no explanations).")
+
+            # Tạo prompt chi tiết
+            prompt = f"""Bạn là một giáo viên tiếng Anh chuyên về ngữ pháp. Hãy kiểm tra và giải thích ngữ pháp dựa trên yêu cầu của học viên.
+
+Yêu cầu của học viên:
+{user_input}
+
+Hãy phân tích và giải thích với các phần sau:
+1. Lời chào và giới thiệu
+2. Phân tích câu/đoạn văn
+3. Chỉ ra lỗi ngữ pháp (nếu có)
+4. Giải thích quy tắc ngữ pháp
+5. Đưa ra ví dụ minh họa
+6. Bài tập luyện tập
+7. Lời khuyên học ngữ pháp
+
+Yêu cầu:
+1. Sử dụng ngôn ngữ đơn giản, dễ hiểu
+2. Giải thích chi tiết và rõ ràng
+3. Đưa ra nhiều ví dụ thực tế
+4. KHÔNG sử dụng markdown hoặc định dạng đặc biệt
+5. Sử dụng dấu xuống dòng để phân tách các phần
+6. Thêm các câu hỏi để tương tác với học viên"""
+
+            logger.info(f"[GrammarAgent] Generating grammar analysis with detailed prompt.")
+            logger.info(f"[GrammarAgent] Prompt: {prompt}")
+
+            # Gọi Gemini API thông qua BaseAgent
+            full_response = ""
+            async for chunk in self.ask(prompt):
+                if chunk:
+                    full_response += chunk
+
+            if not full_response:
+                return {
+                    "error": "Không nhận được phản hồi từ AI",
+                    "details": "Vui lòng thử lại sau"
+                }
+
+            # Xử lý response
+            try:
+                # Xử lý nội dung
+                content = self._clean_content(full_response)
+                
+                # Trả về dạng text đơn giản
+                return {
+                    "content": content,
+                    "type": "text"
+                }
+                
+            except Exception as e:
+                logger.error(f"[GrammarAgent] Failed to process response: {e}. Response: {full_response}")
+                return {
+                    "error": "Không thể xử lý phản hồi từ AI",
+                    "details": str(e)
+                }
+
+        except Exception as e:
+            logger.error(f"[GrammarAgent] Error analyzing grammar: {e}")
             return {
-                "original_text": text,
-                "corrected_text": raw_response.strip(),
-                "corrections": []
+                "error": "Lỗi khi phân tích ngữ pháp",
+                "details": str(e)
             }
-
-    async def provide_examples(self, grammar_point: str, count: int = 3, context: Optional[str] = None) -> List[str]:
-        """
-        Cung cấp các ví dụ sử dụng một điểm ngữ pháp cụ thể.
-        """
-        prompt_context = f" trong ngữ cảnh {context}" if context else ""
-        prompt = f"""Cung cấp {count} câu ví dụ minh họa cách sử dụng điểm ngữ pháp sau: '{grammar_point}'{prompt_context}.
-Các ví dụ nên rõ ràng, đa dạng và dễ hiểu.
-Chỉ trả về danh sách các câu ví dụ, mỗi câu trên một dòng mới. Không cần giải thích thêm.
-Ví dụ:
-Ví dụ 1...
-Ví dụ 2...
-Ví dụ 3...
-"""
-        logger.info(f"[{self.__class__.__name__}] Providing {count} examples for '{grammar_point}' (context: {context})")
-        
-        response_parts = []
-        async for chunk in self.ask(prompt):
-            response_parts.append(chunk)
-        full_response = "".join(response_parts)
-        
-        # Tách các ví dụ dựa trên xuống dòng
-        examples = [ex.strip() for ex in full_response.split('\n') if ex.strip()]
-        
-        logger.info(f"[{self.__class__.__name__}] Provided examples: {examples}")
-        return examples
-
-    async def run(self, command: str, **kwargs) -> Any:
-        """
-        Chạy một lệnh cụ thể của GrammarAgent.
-        - command: "explain_rule", "correct_text", "provide_examples"
-        - kwargs: phụ thuộc vào lệnh
-            - explain_rule: rule_name (str), level (str, optional)
-            - correct_text: text (str), explain_errors (bool, optional, default True)
-            - provide_examples: grammar_point (str), count (int, optional, default 3), context (str, optional)
-        """
-        logger.info(f"[{self.__class__.__name__}] Running command '{command}' with kwargs: {kwargs}")
-        if command == "explain_rule":
-            rule_name = kwargs.get("rule_name")
-            if not rule_name:
-                return "Lỗi: 'rule_name' là bắt buộc cho lệnh 'explain_rule'."
-            level = kwargs.get("level", "intermediate")
-            return await self.explain_grammar_rule(rule_name=rule_name, level=level)
-        
-        elif command == "correct_text":
-            text_to_correct = kwargs.get("text")
-            if not text_to_correct:
-                return {"error": "Lỗi: 'text' là bắt buộc cho lệnh 'correct_text'."}
-            explain = kwargs.get("explain_errors", True)
-            return await self.correct_text(text=text_to_correct, explain_errors=explain)
-            
-        elif command == "provide_examples":
-            grammar_point = kwargs.get("grammar_point")
-            if not grammar_point:
-                return "Lỗi: 'grammar_point' là bắt buộc cho lệnh 'provide_examples'."
-            count = kwargs.get("count", 3)
-            context = kwargs.get("context")
-            return await self.provide_examples(grammar_point=grammar_point, count=count, context=context)
-            
-        else:
-            logger.warning(f"[{self.__class__.__name__}] Unknown command: {command}")
-            return f"Lệnh không xác định: {command}. Các lệnh hợp lệ: 'explain_rule', 'correct_text', 'provide_examples'."
 
 # Test thử agent
 async def main():
